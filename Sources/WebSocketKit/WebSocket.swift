@@ -35,6 +35,9 @@ public final class WebSocket {
     private var waitingForClose: Bool
     private var scheduledTimeoutTask: Scheduled<Void>?
 
+    private var bufferedMessages: [String] = []
+    private var bufferedBinaryMessages: [ByteBuffer] = []
+    
     init(channel: Channel, type: PeerType) {
         self.channel = channel
         self.type = type
@@ -45,14 +48,35 @@ public final class WebSocket {
         self.waitingForPong = false
         self.waitingForClose = false
         self.scheduledTimeoutTask = nil
+        
+        self.onTextCallback = { [weak self] _, string in
+            self?.bufferedMessages.append(string)
+        }
+        self.onBinaryCallback = { [weak self] _, msg in
+            self?.bufferedBinaryMessages.append(msg)
+        }
     }
 
     public func onText(_ callback: @escaping (WebSocket, String) -> ()) {
         self.onTextCallback = callback
+        
+        eventLoop.execute {
+            self.bufferedMessages.forEach {
+                self.onTextCallback(self, $0)
+            }
+            self.bufferedMessages = []
+	    }
     }
 
     public func onBinary(_ callback: @escaping (WebSocket, ByteBuffer) -> ()) {
         self.onBinaryCallback = callback
+        
+        eventLoop.execute {
+            self.bufferedBinaryMessages.forEach {
+                self.onBinaryCallback(self, $0)
+            }
+            self.bufferedBinaryMessages = []
+	    }
     }
     
     public func onPong(_ callback: @escaping (WebSocket) -> ()) {
