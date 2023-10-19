@@ -29,13 +29,17 @@ public final class WebSocket: Sendable {
         self.channel.closeFuture
     }
 
+    private var binaryMessageHandler: (Int, NIOLoopBoundBox<(WebSocket, ByteBuffer) -> ()>)?
+    private var bufferedBinaryMessages: [ByteBuffer] = []
+
     @usableFromInline
     /* private but @usableFromInline */
     internal let channel: Channel
     private let onTextCallback: NIOLoopBoundBox<@Sendable (WebSocket, String) -> ()>
-    private let onBinaryCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
+    // private let onBinaryCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
     private let onPongCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
     private let onPingCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
+    private var onPingTimeoutCallback: NIOLoopBoundBox<(WebSocket) -> ()>
     private let type: PeerType
     private let waitingForPong: NIOLockedValueBox<Bool>
     private let waitingForClose: NIOLockedValueBox<Bool>
@@ -47,9 +51,10 @@ public final class WebSocket: Sendable {
         self.channel = channel
         self.type = type
         self.onTextCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
-        self.onBinaryCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
+        // self.onBinaryCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
         self.onPongCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
         self.onPingCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
+        self.onPingTimeoutCallback = .init({ _ in }, eventLoop: channel.eventLoop)
         self.waitingForPong = .init(false)
         self.waitingForClose = .init(false)
         self.scheduledTimeoutTask = .init(nil)
@@ -62,10 +67,14 @@ public final class WebSocket: Sendable {
         self.onTextCallback.value = callback
     }
 
-    @preconcurrency public func onBinary(_ callback: @Sendable @escaping (WebSocket, ByteBuffer) -> ()) {
-        self.onBinaryCallback.value = callback
-    }
+    // @preconcurrency public func onBinary(_ callback: @Sendable @escaping (WebSocket, ByteBuffer) -> ()) {
+    //     self.onBinaryCallback.value = callback
+    // }
     
+    public func onPingTimeout(_ callback: @escaping (WebSocket) -> ()) {
+        self.onPingTimeoutCallback.value = callback
+    }
+
     public func onPong(_ callback: @Sendable @escaping (WebSocket, ByteBuffer) -> ()) {
         self.onPongCallback.value = callback
     }
@@ -294,7 +303,7 @@ public final class WebSocket: Sendable {
             if let frameSequence = currentFrameSequence, frame.fin {
                 switch frameSequence.type {
                 case .binary:
-                    self.onBinaryCallback.value(self, frameSequence.binaryBuffer)
+                    self.dispatchBinaryMessage(frameSequence.binaryBuffer)
                 case .text:
                     self.onTextCallback.value(self, frameSequence.textBuffer)
                 case .ping, .pong:
@@ -303,6 +312,37 @@ public final class WebSocket: Sendable {
                 }
                 currentFrameSequence = nil
             }
+        }
+    }
+
+    public func handleBinaryMessages(count: Int = .max, _ callback: @escaping  (WebSocket, ByteBuffer) -> ()) {
+        eventLoop.execute {
+            self.binaryMessageHandler = (count, .init(callback, eventLoop: self.channel.eventLoop))
+            
+            let messages = self.bufferedBinaryMessages
+            self.bufferedBinaryMessages = []
+            
+            messages.forEach {
+                self.dispatchBinaryMessage($0)
+            }
+        }
+    }
+
+    private func dispatchBinaryMessage(_ buffer: ByteBuffer) {
+        if let (count, callback) = binaryMessageHandler {
+            let count = (count - 1)
+            
+            if count == 0 {
+                binaryMessageHandler = nil
+            }
+            else {
+                binaryMessageHandler?.0 = count
+            }
+            
+            callback.value(self, buffer)
+        }
+        else {
+            bufferedBinaryMessages.append(buffer)
         }
     }
 
@@ -315,6 +355,9 @@ public final class WebSocket: Sendable {
         if waitingForPong.withLockedValue({ $0 }) {
             // We never received a pong from our last ping, so the connection has timed out
             let promise = self.eventLoop.makePromise(of: Void.self)
+
+            self.onPingTimeoutCallback.value(self)
+
             self.close(code: .unknown(1006), promise: promise)
             promise.futureResult.whenComplete { _ in
                 // Usually, closing a WebSocket is done by sending the close frame and waiting
