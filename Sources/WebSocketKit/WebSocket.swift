@@ -29,7 +29,7 @@ public final class WebSocket: Sendable {
         self.channel.closeFuture
     }
 
-    private var binaryMessageHandler: (Int, NIOLoopBoundBox<(WebSocket, ByteBuffer) -> ()>)?
+    private var binaryMessageHandler: (Int, (WebSocket, ByteBuffer) -> ())?
     private var bufferedBinaryMessages: [ByteBuffer] = []
 
     @usableFromInline
@@ -39,7 +39,7 @@ public final class WebSocket: Sendable {
     // private let onBinaryCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
     private let onPongCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
     private let onPingCallback: NIOLoopBoundBox<@Sendable (WebSocket, ByteBuffer) -> ()>
-    private var onPingTimeoutCallback: NIOLoopBoundBox<(WebSocket) -> ()>
+    private var onPingTimeoutCallback: (WebSocket) -> ()
     private let type: PeerType
     private let waitingForPong: NIOLockedValueBox<Bool>
     private let waitingForClose: NIOLockedValueBox<Bool>
@@ -54,7 +54,7 @@ public final class WebSocket: Sendable {
         // self.onBinaryCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
         self.onPongCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
         self.onPingCallback = .init({ _, _ in }, eventLoop: channel.eventLoop)
-        self.onPingTimeoutCallback = .init({ _ in }, eventLoop: channel.eventLoop)
+        self.onPingTimeoutCallback = { _ in }
         self.waitingForPong = .init(false)
         self.waitingForClose = .init(false)
         self.scheduledTimeoutTask = .init(nil)
@@ -72,7 +72,7 @@ public final class WebSocket: Sendable {
     // }
     
     public func onPingTimeout(_ callback: @escaping (WebSocket) -> ()) {
-        self.onPingTimeoutCallback.value = callback
+        self.onPingTimeoutCallback = callback
     }
 
     public func onPong(_ callback: @Sendable @escaping (WebSocket, ByteBuffer) -> ()) {
@@ -315,9 +315,9 @@ public final class WebSocket: Sendable {
         }
     }
 
-    public func handleBinaryMessages(count: Int = .max, _ callback: @escaping  (WebSocket, ByteBuffer) -> ()) {
+    public func handleBinaryMessages(count: Int = .max, _ callback: @escaping (WebSocket, ByteBuffer) -> ()) {
         eventLoop.execute {
-            self.binaryMessageHandler = (count, .init(callback, eventLoop: self.channel.eventLoop))
+            self.binaryMessageHandler = (count, callback)
             
             let messages = self.bufferedBinaryMessages
             self.bufferedBinaryMessages = []
@@ -339,7 +339,7 @@ public final class WebSocket: Sendable {
                 binaryMessageHandler?.0 = count
             }
             
-            callback.value(self, buffer)
+            callback(self, buffer)
         }
         else {
             bufferedBinaryMessages.append(buffer)
@@ -356,7 +356,7 @@ public final class WebSocket: Sendable {
             // We never received a pong from our last ping, so the connection has timed out
             let promise = self.eventLoop.makePromise(of: Void.self)
 
-            self.onPingTimeoutCallback.value(self)
+            self.onPingTimeoutCallback(self)
 
             self.close(code: .unknown(1006), promise: promise)
             promise.futureResult.whenComplete { _ in
